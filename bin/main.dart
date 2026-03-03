@@ -240,6 +240,7 @@
 
 
 import 'dart:convert';
+import 'dart:io';
 import 'package:shelf/shelf.dart';
 import 'package:shelf/shelf_io.dart' as io;
 import 'package:shelf_router/shelf_router.dart';
@@ -256,16 +257,13 @@ late DbCollection users;
 late DbCollection posts;
 late DbCollection comments;
 
-bool isDbConnected = false;
-String lastDbError = "";
-
-/// Convert ObjectId to plain hex string
+/// Converts ObjectId → plain hex string safely.
 String oidToHex(dynamic id) {
   if (id is ObjectId) return id.toHexString();
   return id.toString();
 }
 
-/// Ensure MongoDB connection is alive
+/// ✅ Ensures MongoDB is always connected
 Future<void> ensureDbConnected() async {
   try {
     if (db.state != State.OPEN) {
@@ -273,12 +271,8 @@ Future<void> ensureDbConnected() async {
       await db.open();
       print("MongoDB reconnected successfully.");
     }
-    isDbConnected = true;
-    lastDbError = "";
   } catch (e) {
-    isDbConnected = false;
-    lastDbError = e.toString();
-    print("MongoDB error: $e");
+    print("MongoDB reconnection failed: $e");
     rethrow;
   }
 }
@@ -287,11 +281,8 @@ void main() async {
   try {
     db = await Db.create(env['MONGO_URL']!);
     await db.open();
-    isDbConnected = true;
     print("MongoDB connected successfully.");
   } catch (e) {
-    isDbConnected = false;
-    lastDbError = e.toString();
     print("Initial MongoDB connection failed: $e");
   }
 
@@ -301,114 +292,28 @@ void main() async {
 
   final router = Router();
 
-  /////////////////////////////////////////////////////////////
-  // ROOT ROUTE (GET)
-  /////////////////////////////////////////////////////////////
-
-  router.get('/', (Request request) {
-    return Response.ok(
-      jsonEncode({
-        "message": "API running successfully 🚀",
-        "status": "online"
-      }),
-      headers: {"Content-Type": "application/json"},
-    );
-  });
-
-  /////////////////////////////////////////////////////////////
-  // ROOT ROUTE (HEAD support)
-  /////////////////////////////////////////////////////////////
-
-  router.head('/', (Request request) {
-    return Response.ok('');
-  });
-
-  /////////////////////////////////////////////////////////////
-  // HEALTH ROUTE
-  /////////////////////////////////////////////////////////////
-
-  router.get('/health', (Request request) async {
-    try {
-      await ensureDbConnected();
-
-      return Response.ok(
-        jsonEncode({
-          "status": "healthy",
-          "server": "running",
-          "database": isDbConnected ? "connected" : "disconnected",
-          "timestamp": DateTime.now().toIso8601String(),
-        }),
-        headers: {"Content-Type": "application/json"},
-      );
-    } catch (e) {
-      return Response.internalServerError(
-        body: jsonEncode({
-          "status": "unhealthy",
-          "server": "running",
-          "database": "disconnected",
-          "error": lastDbError,
-          "timestamp": DateTime.now().toIso8601String(),
-        }),
-        headers: {"Content-Type": "application/json"},
-      );
-    }
-  });
-
-  /////////////////////////////////////////////////////////////
   // AUTH
-  /////////////////////////////////////////////////////////////
-
   router.post('/signup', signup);
   router.post('/login', login);
 
-  /////////////////////////////////////////////////////////////
   // POSTS
-  /////////////////////////////////////////////////////////////
-
   router.get('/posts', getPosts);
   router.post('/posts', createPost);
 
-  /////////////////////////////////////////////////////////////
   // PROFILE
-  /////////////////////////////////////////////////////////////
-
   router.put('/update-profile-image', updateProfileImage);
 
-  /////////////////////////////////////////////////////////////
   // COMMENTS
-  /////////////////////////////////////////////////////////////
-
   router.post('/comments', addComment);
   router.get('/comments/<postId>', getComments);
 
-  /////////////////////////////////////////////////////////////
-  // GLOBAL ERROR HANDLER
-  /////////////////////////////////////////////////////////////
-
-  final handler = Pipeline()
-      .addMiddleware(logRequests())
+  final handler = const Pipeline()
       .addMiddleware(corsHeaders())
-      .addMiddleware((innerHandler) {
-        return (request) async {
-          try {
-            return await innerHandler(request);
-          } catch (e, stack) {
-            print("UNHANDLED ERROR: $e");
-            print(stack);
-            return Response.internalServerError(
-              body: jsonEncode({
-                "error": "Internal server error",
-                "details": e.toString()
-              }),
-              headers: {"Content-Type": "application/json"},
-            );
-          }
-        };
-      })
+      .addMiddleware(logRequests())
       .addHandler(router);
 
   await io.serve(handler, '0.0.0.0', 8080);
-  print("Server running on port 8080");
+  print('Server running on port 8080');
 }
 
 //////////////////////////////////////////////////////////////
@@ -584,7 +489,7 @@ Future<Response> getComments(Request request, String postId) async {
     await ensureDbConnected();
 
     final result = await comments
-        .find(where.eq("postId", postId).sortBy("createdAt"))
+        .find(where.eq("postId", postId).sortBy("createdAt", descending: false))
         .toList();
 
     final formatted = result.map((comment) {
